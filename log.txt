@@ -1,0 +1,20 @@
+23:24:40 Inicio do programa [7701]
+->23:24:40 Mutexes criados
+23:24:40 Warehouse2 criada (id = 7704)
+23:24:40 Warehouse1 criada (id = 7703)
+23:24:40 Armazem1 atualizou o stock: 20 prod do tipo Prod_D
+23:24:40 Armazem2 atualizou o stock: 20 prod do tipo Prod_C
+23:24:40 Armazem2 atualizou o stock: 20 prod do tipo Prod_D
+23:24:40 Encomenda REQ_1-1 recebida pela Central
+23:24:40 Encomenda REQ_1-1 enviada ao drone 3
+23:24:40 Encomenda REQ_1-2 recebida pela Central
+23:24:40 Encomenda REQ_1-2 enviada ao drone 7
+23:24:40 Armazem2 atualizou o stock: 20 prod do tipo Prod_B
+23:24:40 Armazem2 atualizou o stock: 20 prod do tipo Prod_D
+23:24:40 Armazem1 atualizou o stock: 20 prod do tipo Prod_A
+23:24:40 Armazem2 atualizou o stock: 20 prod do tipo Prod_C
+23:24:40 Armazem1 atualizou o stock: 20 prod do tipo Prod_D
+23:24:40 Armazem2 atualizou o stock: 20 prod do tipo Prod_C
+23:24:40 Armazem1 atualizou o stock: 20 prod do tipo Prod_D
+23:24:40 Armazem2 atualizou o stock: 20 prod do tipo Prod_D
+23:25:43 Fim do processo armazem 7703
