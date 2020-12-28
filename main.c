@@ -1,8 +1,11 @@
 /*
-    Antonio Sergio da Silva Lopes  -  2017262466
-    Maria Paula de Alencar Viegas  -  2017125592
-    gcc main.c -lpthread -D_REENTRANT -Wall -o prog estruturas.h drone_movement.c drone_movement.h  -lm
+    ps -ef | grep prog
+    killall -9 prog
+    gcc main.c -lpthread -D_REENTRANT -Wall -o prog global.h listas.c l
     echo "ORDER REQ_1 Prod:A, 5 to: 300, 100" >input_pipe
+
+    mutexes arrays
+    achar base mais proxima para drone
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,8 +45,7 @@ char mensagem[MAX_BUFFER];
 //memoria partilhada
 Estats *estatisticas;
 Warehouse *armazensShm;
-int shmid_estats, shmid_armazens, mutex_shmid;
-int sem_shmid;
+int shmid_estats, shmid_armazens, sem_shmid, mutex_shmid;
 
 //pipe
 int fd_pipe;
@@ -57,6 +59,7 @@ pid_t processo_armazem, pidWh;
 
 //threads
 pthread_t *my_thread;
+int drones_acabaram_criacao = 0;
 Drones *arrayDrones;
 
 //MQ
@@ -64,21 +67,24 @@ int mq_id;
 int mq_id2;
 
 //semaforos e mutexes
-//sem_struct *semaforos;
+sem_struct *semaforos;
 mutex_struct *mutexes;
 pthread_cond_t cond_nao_escolhido = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t get_queue =PTHREAD_MUTEX_INITIALIZER;
+sem_t sem_mq;
+sem_t sem_mq2;
 
 //funcoes
 void generateStock();
 int escolheDrone();
 void sinal_estatistica();
 void sinal_saida (int sig);
-void *controla_drone(void *id_ptr);
+void *controla_drone(void *arrayDrones);
 void write_log(char* mensagem);
 void ArmazensProcess();
 void criaArmazens(int n);
 void central();
-//void shm_semaforos();
+void shm_semaforos();
 void shm_mutex();
 void criaDrones(int numI, int qtd);
 void escolhe_armazem(Encomenda *novoNode);
@@ -231,7 +237,10 @@ int main() {
     shm_mutex();
 
     //inicializa os semaforos
-    //shm_semaforos();
+    shm_semaforos();
+
+    sem_init(&sem_mq, 0, 0);
+    sem_init(&sem_mq2,0,0);
 
     //cria shared mem_armazens
     shmid_armazens = shmget(IPC_PRIVATE, sizeof(Warehouse) * dados->numWh, IPC_CREAT | 0766);
@@ -243,9 +252,9 @@ int main() {
         armazensShm[k].nome = arrayArmazens[k].nome;
         armazensShm[k].coordenadas[0] = arrayArmazens[k].coordenadas[0];
         armazensShm[k].coordenadas[1] = arrayArmazens[k].coordenadas[1];
-        armazensShm[k].produtos[0] = arrayArmazens[k].produtos[0];
-        armazensShm[k].produtos[1] = arrayArmazens[k].produtos[1];
-        armazensShm[k].produtos[2] = arrayArmazens[k].produtos[2];
+           armazensShm[k].produtos[0] = arrayArmazens[k].produtos[0];
+           armazensShm[k].produtos[1] = arrayArmazens[k].produtos[1];
+           armazensShm[k].produtos[2] = arrayArmazens[k].produtos[2];
         armazensShm[k].W_NO = arrayArmazens[k].W_NO;
     }
     printf("->Armazens na Shared Memory.\n");
@@ -285,10 +294,8 @@ int main() {
         }
     }
     generateStock();
-    sleep(1);
 }
 
-//Gera reabastecimento de stock
 void generateStock() {
     int i = 1;
     int contador = 1;
@@ -312,7 +319,7 @@ void generateStock() {
             strcpy(atualiza.nome_prod,prods[k]);
             atualiza.comentario = 1;
             msgsnd(mq_id, &atualiza, sizeof(atualiza) - sizeof(long), 0);
-            sleep(dados->f_abast/5);
+            sleep(dados->f_abast);
             contador++;
             }
         if(contador > dados->numWh) {
@@ -322,7 +329,7 @@ void generateStock() {
     }
 }
 
-/*// Inicializar semáforos em memória partilhada
+// Inicializar semáforos em memória partilhada
 void shm_semaforos() {
     time_t tempo = time(NULL);
     struct tm *t = localtime(&tempo);
@@ -335,8 +342,8 @@ void shm_semaforos() {
     }
 
     // Inicializar
-    sem_init(&semaforos->mq1, 1, dados->qyd);
-    sem_init(&semaforos->mq2, 0, dados->qtd);
+    sem_init(&semaforos->n_drones, 1, dados->n_drones);
+    sem_init(&semaforos->mq, 0, dados->qtd);
 
     sprintf(mensagem, "->%d:%d:%d Semaforos criados\n",t->tm_hour,t->tm_min,t->tm_sec);
     printf("%s", mensagem);
@@ -344,7 +351,7 @@ void shm_semaforos() {
     write_log(mensagem);
     pthread_mutex_unlock(&mutexes->write_file);
     mensagem[0]='\0';
-}*/
+}
 
 // Inicializar mutexes
 void shm_mutex() {
@@ -363,9 +370,9 @@ void shm_mutex() {
         perror("Error - init() of mutexes->write_file");
     }
 
-    if(pthread_mutex_init(&mutexes->get_queue, NULL) != 0) {
-        perror("Error - init() of mutexes->get_queue");
-    }
+    //if(pthread_mutex_init(&mutexes->get_queue, NULL) != 0) {
+      //  perror("Error - init() of mutexes->get_queue");
+    //}
 
     if(pthread_mutex_init(&mutexes->ctrlc, NULL) != 0) {
         perror("Error - init() of mutexes->ctrlc");
@@ -395,7 +402,6 @@ void shm_mutex() {
     mensagem[0]='\0';
 }
 
-//Atualiza armazens
 void criaArmazens(int n) {
     //tempo
     time_t tempo = time(NULL);
@@ -415,7 +421,7 @@ void criaArmazens(int n) {
     printf("Armazem %s; coordernadas x: %d y: %d, produto : %s qt:%d\n", aux.nome, aux.coordenadas[0],
            aux.coordenadas[1], aux.produtos[0].produto, aux.produtos[0].qt);
     
-    sprintf(mensagem, "%d:%d:%d Warehouse%d criada (id = %ld)\n", t->tm_hour, t->tm_min, t->tm_sec, n, (long) getpid());
+    sprintf(mensagem, "%d:%d:%d Warehouse%d criada ( = %ld)\n", t->tm_hour, t->tm_min, t->tm_sec, n, (long) getpid());
     write_log(mensagem);
     mensagem[0] = '\0';
 
@@ -423,6 +429,8 @@ void criaArmazens(int n) {
     while (1) {
         maisStock mexeStock;
         if (msgrcv(mq_id, &mexeStock, sizeof(mexeStock) - sizeof(long), n, 0)) {
+            printf("Comentario: %d \n\n", mexeStock.comentario);
+            fflush(stdout);
             if (mexeStock.comentario == 1) {
                 for (int i = 0; i < 3; i++) {
                     fflush(stdout);
@@ -430,93 +438,102 @@ void criaArmazens(int n) {
                         pthread_mutex_lock(&(mutexes->write_armazens));
                         aux.produtos[i].qt = aux.produtos[i].qt + mexeStock.num_products;
                         pthread_mutex_unlock(&(mutexes->write_armazens));
-                        sprintf(mensagem, "%d:%d:%d Armazem%d atualizou o stock: %d prod do tipo %s\n",
-                            t->tm_hour, t->tm_min, t->tm_sec, n, mexeStock.num_products, mexeStock.nome_prod);
-                        printf("----------------------------------------------------------\n%s----------------------------------------------------------\n", mensagem);
-                        pthread_mutex_lock(&(mutexes->write_file));
+                        sprintf(mensagem, "%d:%d:%d Armazem%d atualizou o stock: %d prod do tipo %s\n", t->tm_hour,
+                                t->tm_min, t->tm_sec, n, mexeStock.num_products, mexeStock.nome_prod);
+                        printf("%s", mensagem);
                         write_log(mensagem);
-                        pthread_mutex_unlock(&(mutexes->write_file));
                         mensagem[0] = '\0';
                     }
                 }
-                //printf("Atualizado\n");
+                printf("Atualizado\n");
                 fflush(stdout);
             }
-            if(mexeStock.comentario == 2) {
+
+                if (mexeStock.comentario == 2) {
                 maisStock manda;
                 manda.num_products = mexeStock.num_products;
                 manda.mtype = (long) mexeStock.dronetype;
                 strcpy(manda.nome_prod, mexeStock.nome_prod);
 
-                msgsnd(mq_id2, &manda, sizeof(manda) - sizeof(long), 0);
-                //printf("Atualizado\n");
+                printf("o DRONE TYPE %ld \n \n",manda.mtype);
+
+                msgsnd(mq_id, &manda, sizeof(manda) - sizeof(long), 0);
+                printf("ATUALIZADO ARMAZEM\n");
             }
         }
+
     }
 }
 
-//Movimentacao do drone conforme encomenda
 void *controla_drone (void *arrayDrones) {
    time_t tempo = time(NULL);
    struct tm *t = localtime(&tempo);
    int hora, min, seg;
    float tTotal=0.0;
    Drones *drone = arrayDrones;
-   signal(SIGINT, sinal_saida);
+   //printf("sou drone %d  com estado %d\n ",drone->id,drone->estado);
 
     while (1) {
-        pthread_mutex_lock(&mutexes->get_queue);
+        //int * = id_ptr; // do array
+        //printf("ESTE E O %d\n",*);
+        printf(" drone %d ESTADO: %d\n",drone->id,drone->estado);
+        //caso o drone nao tenha uma encomenda atribuida
+        pthread_mutex_lock(&get_queue);
         while (drone->estado == 1) {
-            pthread_cond_wait(&cond_nao_escolhido, &(mutexes->get_queue));
-            printf(" drone %d   estado: %d\n", drone->id, drone->estado);
+            printf("Estado deste dron %d  e %d\n",drone->id ,drone->estado);
+            pthread_cond_wait(&cond_nao_escolhido,&(get_queue));
+            printf(" drone %d ESTADO: %d\n", drone->id, drone->estado);
         }
+        pthread_mutex_unlock(&(get_queue));
+        if (drone->estado == 2) {
 
-        pthread_mutex_unlock(&mutexes->get_queue);
-
-        if (drone->estado == 2) {  //Drone a deslocar-se da base ate o armazem
+           // pthread_mutex_lock(&mutexes->get_queue);
             printf("DX: %0.2f   DY: %0.2f    AX:  %0.2f      AY:   %0.2f \n", drone->posI[0], drone->posI[1],
                    drone->encomenda.coordernadasArmazem[0], drone->encomenda.coordernadasArmazem[1]);
             printf("Drone com ID %d a movimentar se para o Armazem\n", drone->id);
+
             while (move_towards(&drone->posI[0], &drone->posI[1],drone->encomenda.coordernadasArmazem[0], drone->encomenda.coordernadasArmazem[1]) >= 0) {
                 printf("DRONE %d a deslocar se para Armazem (X: %0.2f   Y: %0.2f)\n ",drone->id, drone->posI[0], drone->posI[1]);
-                sleep(dados->unidadeT/5);
+                sleep(dados->unidadeT / 5);
             }
-            printf("Chegou no Armazem\n");
-
+            printf("Aterrou no Armazem\n");
             drone->estado = 3;
-
+           // pthread_mutex_unlock(&mutexes->get_queue);
         }
-
-        if (drone->estado == 3) { //Drone a fazer o carregamento
+        if (drone->estado == 3) {
             maisStock manda;
             manda.mtype = (long)drone->encomenda.idArmazem+1;
             manda.num_products = drone->encomenda.qtd;
             strcpy(manda.nome_prod,drone->encomenda.tipo_produto);
             manda.comentario = 2;
             manda.dronetype = drone->id;
+            printf("A Mandar %d para %ld de %d \n\n",manda.comentario,manda.mtype,drone->id);
 
             msgsnd(mq_id,&manda,sizeof(manda)-sizeof(long),0);
 
             maisStock recebe;
             sleep(manda.num_products);
-            msgrcv(mq_id2, &recebe, sizeof(recebe) - sizeof(long),drone->id, 0);
+            msgrcv(mq_id, &recebe, sizeof(recebe) - sizeof(long),drone->id, 0);
             printf("Carregamento Aceite(Nome Prod: %s  Qt: %d) \n",recebe.nome_prod,recebe.num_products);
+            pthread_mutex_lock(&(mutexes->write_stats));
 
-            pthread_mutex_lock(&mutexes->write_stats);
-            estatisticas->prod_carregados += manda.num_products;
-            pthread_mutex_unlock(&mutexes->write_stats);
+            estatisticas->prod_carregados = estatisticas->prod_carregados + recebe.num_products;
+            pthread_mutex_unlock(&(mutexes->write_stats));
+           // pthread_mutex_lock(&mutexes->get_queue);
             drone->estado = 4;
+         //   pthread_mutex_unlock(&mutexes->get_queue);
         }
-
         if (drone->estado == 4) {  //Drone a deslocar-se do armazem ate o destino
+           // pthread_mutex_lock(&mutexes->get_queue);
             printf("Drone com ID %d a movimentar se para o Destino\n", drone->id);
             while (move_towards(&drone->posI[0], &drone->posI[1],
                                 drone->encomenda.coordenadas[0],
                                 drone->encomenda.coordenadas[1]) >= 0) {
                 printf("DRONE %d a deslocar se para o Destino (X: %0.2f   Y: %0.2f)\n ",drone->id, drone->posI[0], drone->posI[1]);
-                sleep(dados->unidadeT/5);
+                sleep(dados->unidadeT / 10);
             }
             drone->estado = 5;
+           // pthread_mutex_unlock(&mutexes->get_queue);;
 
             //calcula tempo de duracao da entrega da encomenda
             hora = (t->tm_hour) - (drone->encomenda.hora);
@@ -525,42 +542,56 @@ void *controla_drone (void *arrayDrones) {
             tTotal = (hora*3600)+(min*60)+seg;
 
             //atualiza estatisticas
-            pthread_mutex_lock(&mutexes->write_stats);
+            pthread_mutex_lock(&(mutexes->write_stats));
             estatisticas->tempo_medio_individual += tTotal;
             estatisticas->encomendas_entregues += 1;
             estatisticas->prod_entregues += drone->encomenda.qtd;
-            pthread_mutex_unlock(&mutexes->write_stats);
-            
+            pthread_mutex_unlock(&(mutexes->write_stats));
+
             //escreve no log
-            sprintf(mensagem, "%d:%d:%d Encomenda %s-%d entregue no destino pelo drone %d\n",  t->tm_hour, t->tm_min, t->tm_sec, drone->encomenda.nomeEncomenda, drone->encomenda.nSque, drone->id);
+            sprintf(mensagem, "%d:%d:%d Encomenda %s-%d entregue no destino pelo drone %d\n", t->tm_hour, t->tm_min, t->tm_sec, drone->encomenda.nomeEncomenda, drone->encomenda.nSque, drone->id);
             printf("%s", mensagem);
-            pthread_mutex_lock(&mutexes->write_file);
+            pthread_mutex_lock(&(mutexes->write_file));
             write_log(mensagem);
-            pthread_mutex_unlock(&mutexes->write_file);
+            pthread_mutex_unlock(&(mutexes->write_file));
             mensagem[0] = '\0';
 
             //printf("Chegou ao Destino\n");
         }
 
         if (drone->estado == 5) {  //Drone a deslocar-se para uma base
-            
+
             double array[2];
             escolherDestino(array,drone->posI[0],drone->posI[1]);
 
+            //pthread_mutex_lock(&mutexes->get_queue);
+
             printf("A Regressar a base\n");
+
             while (move_towards(&drone->posI[0], &drone->posI[1],array[0],array[1]) > 0) {
                 printf("DRONE %d a deslocar se para Base (X: %0.2f   Y: %0.2f)\n",(drone->id), drone->posI[0], drone->posI[1]);
-                sleep(dados->unidadeT/5);
+                sleep(dados->unidadeT/10);
             }
+            //pthread_mutex_unlock(&mutexes->get_queue);
+            printf("ESTE %d",drone->id);
+
+            pthread_mutex_lock(&(mutexes->write_stats));
+            estatisticas->encomendas_entregues = estatisticas->encomendas_entregues+1;
+            estatisticas->prod_entregues = estatisticas->prod_entregues + drone->encomenda.qtd;
+            pthread_mutex_unlock(&(mutexes->write_stats));
 
             printf("Chegou a base\n");
+          //  pthread_mutex_lock(&mutexes->get_queue);
             drone->estado = 1;
+          //  pthread_mutex_unlock(&mutexes->get_queue);
+            printf("%d\n\n",drone->estado);
+        //    pthread_mutex_unlock(&mutexes->get_queue);
         }
     }
 }
 
-//Escolhe base mais proxima de um drone
-void escolherDestino(double *buf,double x, double y){
+void escolherDestino(double *buf,double x, double y)
+{
     for(int i =0; i < 4; i++) {
         if( i % 4 == 1) {
             //(double) 0;
@@ -606,7 +637,6 @@ void escolherDestino(double *buf,double x, double y){
     }
 }
 
-//escolhe o armazem para uma encomenda
 void escolhe_armazem(Encomenda *novoNode){
     int flag = 1;
     for(int k = 0;k < dados->numWh;k++) {
@@ -633,7 +663,6 @@ void escolhe_armazem(Encomenda *novoNode){
     }
 }
 
-//escolhe o drone para uma encomenda
 int escolheDrone(Encomenda *novoNode){
     printf("SELECIONAR O DRONE PARA A ENCOMENDA FEITA\n");
     int ID = -1;
@@ -661,10 +690,9 @@ int escolheDrone(Encomenda *novoNode){
                 }
             }
         }
-
-        arrayDrones[ID].estado=2;   //o drone ja nao esta mais em repouso 
-        printf("Drone%d mudou para %d\n",arrayDrones[ID].id,arrayDrones[ID].estado);
-        novoNode->id_drone = ID+1;    //guarda em encomenda o id do drone responsavel por ela
+        //pthread_mutex_lock(&mutexes->get_queue);
+        arrayDrones[ID].estado=2;   //o drone ja nao esta mais em repouso
+        novoNode->id_drone = ID+1;    //guarda em encomenda o  do drone responsavel por ela
 
         //guarda as informacoes da encomenda no drone
         arrayDrones[ID].encomenda.tipo_produto = novoNode->tipo_produto;
@@ -675,15 +703,16 @@ int escolheDrone(Encomenda *novoNode){
         arrayDrones[ID].encomenda.coordenadas[1] = novoNode->coordenadas[1];
         arrayDrones[ID].encomenda.nSque = novoNode->nSque;
         arrayDrones[ID].encomenda.nomeEncomenda = novoNode->nomeEncomenda;
-        arrayDrones[ID].encomenda.qtd = novoNode ->qtd;
-        arrayDrones[ID].encomenda.hora = novoNode ->hora;
-        arrayDrones[ID].encomenda.min = novoNode ->min;
-        arrayDrones[ID].encomenda.seg = novoNode ->seg;
-        
+        arrayDrones[ID].encomenda.qtd = novoNode->qtd;
+        printf("%s\n",arrayDrones[ID].encomenda.tipo_produto);
+        printf("Drone : %d e mudou estado para %d \n",arrayDrones[ID].id,arrayDrones[ID].estado);
+
+        //pthread_mutex_unlock(&mutexes->get_queue);
+
         //atualiza estatisticas
-        pthread_mutex_lock(&mutexes->write_stats);
+        pthread_mutex_lock(&(mutexes->write_stats));
         estatisticas->encomendas_atribuidas += 1;
-        pthread_mutex_unlock(&mutexes->write_stats);
+        pthread_mutex_unlock(&(mutexes->write_stats));
 
         return 1;
     } else {    //caso todos os drones estejam ocupados, adicionamos a fila
@@ -691,13 +720,14 @@ int escolheDrone(Encomenda *novoNode){
     }
 }
 
-//cria qtd drones
 void criaDrones(int numI, int qtd){
     int i=0;
-    signal(SIGINT, sinal_saida);
+    //time_t tempo = time(NULL);
+    //struct tm *t = localtime(&tempo);
+
     //cria threads
     my_thread = malloc(dados->qtd * sizeof(pthread_t));
-    arrayDrones = (Drones*)malloc(sizeof(Drones)*qtd);
+    arrayDrones = malloc(sizeof(Drones)*qtd);
     
     for(i=numI; i < qtd; i++) {
         if( i % 4 == 1) {
@@ -717,10 +747,10 @@ void criaDrones(int numI, int qtd){
         arrayDrones[i].estado = 1;
     }
 
-    //long id[qtd+1];
+    long id[qtd+1];
     for(i=numI; i < qtd; i++) {
-        //id[i] = i;
-        printf("->Thread Drone%d criada\t\t", arrayDrones[i].id);
+        id[i] = i;
+        printf("->Thread Drone%d criada\t\t", i);
         pthread_create(&my_thread[i],NULL, controla_drone, &arrayDrones[i]);
         printf("Base x: %0.2f Base Y: %0.2f\n",arrayDrones[i].posI[0],arrayDrones[i].posI[1]);
     }
@@ -728,7 +758,6 @@ void criaDrones(int numI, int qtd){
     printf("->Threads Criadas\n");
 }
 
-//gestao do pipe e dos drones
 void central(){
     headListaE = (Encomenda *) malloc(sizeof(Encomenda));
     headListaE->next = NULL;
@@ -783,10 +812,6 @@ void central(){
             while (strcmp(dados->tipos_produtos[i], produto) != 0) {
                 i++;
             }
-            /*printf("%d drones possiveis\n", dados->n_drones);
-            for (int i=0; i<dados->n_drones; i++){
-                printf("id = %d\n", arrayDrones[i].id);
-            }*/
             printf("\nOpcao: ORDER\n");
             if (strcmp(dados->tipos_produtos[i], produto) == 0) {
                 if(posX <= dados->max_x && posX >= 0 && posY <= dados->max_y && posY >= 0) {
@@ -806,23 +831,38 @@ void central(){
 
                     sprintf(mensagem, "%d:%d:%d Encomenda %s-%d recebida pela Central\n", novoNode->hora, novoNode->min, novoNode->seg, novoNode->nomeEncomenda, novoNode->nSque);
                     printf("%s", mensagem);
-                    pthread_mutex_lock(&mutexes->write_file);
+                    pthread_mutex_lock(&(mutexes->write_file));
                     write_log(mensagem);
-                    pthread_mutex_unlock(&mutexes->write_file);
+                    pthread_mutex_unlock(&(mutexes->write_file));
                     mensagem[0] = '\0';
                     
-                    pthread_mutex_lock(&mutexes->retirar_mq);
+                    //atualiza estatisticas
+                    pthread_mutex_lock(&(mutexes->write_stats));
+                    estatisticas->encomendas_atribuidas += 1;
+                    pthread_mutex_unlock(&(mutexes->write_stats));
+                    pthread_mutex_lock(&(mutexes->retirar_mq));
                     escolhe_armazem(novoNode);
+                    printf("\n\n\n\n\nVALIDADE %d\n\n\n\n",novoNode->validade);
                     if (aux->next == NULL){ //nao ha mensagens na fila
                         if (novoNode->validade == 1) { //ha stock no armazem
                             if (escolheDrone(novoNode) > 0){
+
+                                //printf("ENCOMENDA %s  PROD %s\nID ARMAZEM %d ID DRONE %d\n",novoNode->nomeEncomenda,novoNode->tipo_produto,novoNode->idArmazem,novoNode->id_drone);
+                                //printf("Encomenda criada\n");
+                                //printf("Encomenda a ser realizada\n");
                                 sprintf(mensagem, "%d:%d:%d Encomenda %s-%d enviada ao drone %d\n", t->tm_hour, t->tm_min, t->tm_sec, novoNode->nomeEncomenda, novoNode->nSque, novoNode->id_drone);
                                 printf("%s", mensagem);
-                                pthread_mutex_lock(&mutexes->write_file);
+                                pthread_mutex_lock(&(mutexes->write_file));
                                 write_log(mensagem);
-                                pthread_mutex_unlock(&mutexes->write_file);
+                                pthread_mutex_unlock(&(mutexes->write_file));
                                 mensagem[0] = '\0';
+
+                                printf("ID: %d ESTADO: %d\n",arrayDrones[novoNode->id_drone].id,arrayDrones[novoNode->id_drone].estado);
+
+                                pthread_mutex_lock(&get_queue);
                                 pthread_cond_broadcast(&cond_nao_escolhido);
+                                pthread_mutex_unlock(&get_queue);
+                                printf("ID22: %d ESTADO: %d\n",arrayDrones[novoNode->id_drone].id,arrayDrones[novoNode->id_drone].estado);
 
                             } else if (escolheDrone(novoNode) < 0) { //todos os drones ocupados
                                 aux->next = novoNode;
@@ -831,87 +871,119 @@ void central(){
 
                             sprintf(mensagem, "%d:%d:%d Encomenda %s-%d suspensa por falta de stock\n", t->tm_hour, t->tm_min, t->tm_sec, novoNode->nomeEncomenda, novoNode->nSque);
                             printf("%s", mensagem);
-                            pthread_mutex_lock(&mutexes->write_file);
+                            pthread_mutex_lock(&(mutexes->write_file));
                             write_log(mensagem);
-                            pthread_mutex_unlock(&mutexes->write_file);
+                            pthread_mutex_unlock(&(mutexes->write_file));
                             mensagem[0] = '\0';
                             //adiciona a lista
                             aux->next = novoNode;
+                            novoNode->next = NULL;
+                            printf("\nEncomenda em estado de Espera\n Nome : %s\nProd:%s\nQuantidade: %d\n",novoNode->nomeEncomenda,novoNode->tipo_produto,novoNode->qtd);
+                            printf("OKAY GUARDOU BEM ACHO\n");
+                            aux = aux->next;
+                            printf("\nEncomenda em estado de Espera\n Nome : %s\nProd:%s\nQuantidade: %d\n",aux->nomeEncomenda,aux->tipo_produto,aux->qtd);
+
 
                         }
-                    } else {// ha mensagens na fila
-
+                    } // ha mensagens na fila
                         while(atual != NULL)
                         {
                             escolhe_armazem(atual);
-                            if(atual->validade == 1 && escolheDrone(atual) > 0){
 
+                            if(atual->validade == 1 && escolheDrone(atual) > 0){
+                                printf("E ISTO TAMBEM\n");
                                 sprintf(mensagem, "%d:%d:%d Encomenda %s-%d enviada ao drone %d\n", t->tm_hour, t->tm_min, t->tm_sec, atual->nomeEncomenda, atual->nSque, atual->id_drone);
                                 printf("%s", mensagem);
-                                pthread_mutex_lock(&mutexes->write_file);
+                                pthread_mutex_lock(&(mutexes->write_file));
                                 write_log(mensagem);
-                                pthread_mutex_unlock(&mutexes->write_file);
+                                pthread_mutex_unlock(&(mutexes->write_file));
                                 mensagem[0] = '\0';
+
+                                printf("ID: %d ESTADO: %d\n",arrayDrones[novoNode->id_drone].id,arrayDrones[novoNode->id_drone].estado);
+                                pthread_mutex_lock(&get_queue);
                                 pthread_cond_broadcast(&cond_nao_escolhido);
+                                pthread_mutex_unlock(&get_queue);
+                                printf("ID21: %d ESTADO: %d\n",arrayDrones[novoNode->id_drone].id,arrayDrones[novoNode->id_drone].estado);
+
                                 //retira encomenda da fila
                                 anterior->next = atual->next;
                                 atual->next = NULL;
                                 free(atual);
-                                atual=anterior->next;
-                            } else {
+                                //atual=anterior->next;
+                            }
+                            if(atual->next == NULL)
+                            {
+                                printf("NAO EXISTE MAIS ENCOMENDAS NA FILA DE ESPERA\n");
+                                break;
+                            }
+                            else {
                                 //continua a percorrer a fila
                                 atual = atual->next;
                                 anterior = anterior->next;
                             }
                         }
-
                         escolhe_armazem(novoNode);
-                        if(novoNode->validade == 0 || escolheDrone(novoNode) < 0) { //nao ha stock ou todos os drones estao ocupados
-                            //escrever no log
-                            if(atual->validade == 0){
-                                sprintf(mensagem, "%d:%d:%d Encomenda %s-%d suspensa por falta de stock\n", t->tm_hour, t->tm_min, t->tm_sec, novoNode->nomeEncomenda, novoNode->nSque);
+                        printf("\n\n\n\n\nVALIDADE %d\n\n\n\n",novoNode->validade);
+                        if (novoNode->validade == 1) { //ha stock no armazem
+                            if (escolheDrone(novoNode) > 0){
+
+                                //printf("ENCOMENDA %s  PROD %s\nID ARMAZEM %d ID DRONE %d\n",novoNode->nomeEncomenda,novoNode->tipo_produto,novoNode->idArmazem,novoNode->id_drone);
+                                //printf("Encomenda criada\n");
+                                //printf("Encomenda a ser realizada\n");
+                                sprintf(mensagem, "%d:%d:%d Encomenda %s-%d enviada ao drone %d\n", t->tm_hour, t->tm_min, t->tm_sec, novoNode->nomeEncomenda, novoNode->nSque, novoNode->id_drone);
                                 printf("%s", mensagem);
-                                pthread_mutex_lock(&mutexes->write_file);
+                                pthread_mutex_lock(&(mutexes->write_file));
                                 write_log(mensagem);
-                                pthread_mutex_unlock(&mutexes->write_file);
+                                pthread_mutex_unlock(&(mutexes->write_file));
                                 mensagem[0] = '\0';
+
+                                printf("ID: %d ESTADO: %d\n",arrayDrones[novoNode->id_drone].id,arrayDrones[novoNode->id_drone].estado);
+
+                                pthread_mutex_lock(&get_queue);
+                                pthread_cond_broadcast(&cond_nao_escolhido);
+                                pthread_mutex_unlock(&get_queue);
+                                printf("ID22: %d ESTADO: %d\n",arrayDrones[novoNode->id_drone].id,arrayDrones[novoNode->id_drone].estado);
+
+                            } else if (escolheDrone(novoNode) < 0) { //todos os drones ocupados
+                                while(aux->next != NULL){
+                                    aux = aux->next;
+                                }
+                                aux->next = novoNode;
                             }
-                            //adicionar a fila
-                            while (aux->next != NULL) {
-                                aux = aux->next;
-                            }
+                        } else { //nao ha stock em nenhum armazem
+
+                            sprintf(mensagem, "%d:%d:%d Encomenda %s-%d suspensa por falta de stock\n", t->tm_hour, t->tm_min, t->tm_sec, novoNode->nomeEncomenda, novoNode->nSque);
+                            printf("%s", mensagem);
+                            pthread_mutex_lock(&(mutexes->write_file));
+                            write_log(mensagem);
+                            pthread_mutex_unlock(&(mutexes->write_file));
+                            mensagem[0] = '\0';
+                            //adiciona a lista
                             aux->next = novoNode;
                             novoNode->next = NULL;
+                            printf("\nEncomenda em estado de Espera\n Nome : %s\nProd:%s\nQuantidade: %d\n",novoNode->nomeEncomenda,novoNode->tipo_produto,novoNode->qtd);
+                            printf("OKAY GUARDOU BEM ACHO\n");
+                            aux = aux->next;
+                            printf("\nEncomenda em estado de Espera\n Nome : %s\nProd:%s\nQuantidade: %d\n",aux->nomeEncomenda,aux->tipo_produto,aux->qtd);
 
-                        } else if (novoNode->validade == 1 && escolheDrone(novoNode) > 0) {
-                            //escrever no log
-                            sprintf(mensagem, "%d:%d:%d Encomenda %s-%d enviada ao drone %d\n", t->tm_hour, t->tm_min, t->tm_sec, novoNode->nomeEncomenda, novoNode->nSque, novoNode->id_drone);
-                            printf("%s", mensagem);
-                            pthread_mutex_lock(&mutexes->write_file);
-                            write_log(mensagem);
-                            pthread_mutex_unlock(&mutexes->write_file);
-                            mensagem[0] = '\0';
-                            //broadcast
-                            pthread_mutex_lock(&(mutexes->get_queue));
-                            pthread_cond_broadcast(&cond_nao_escolhido);
-                            pthread_mutex_unlock(&(mutexes->get_queue));
+
                         }
-                    }
+
  
                     pthread_mutex_unlock(&mutexes->retirar_mq);
 
                 } else {
                     sprintf(mensagem, "%d:%d:%d Coordenada invalida: %s \n", t->tm_hour, t->tm_min, t->tm_sec, linha);
-                    pthread_mutex_lock(&mutexes->write_file);
+                    pthread_mutex_lock(&(mutexes->write_file));
                     write_log(mensagem);
-                    pthread_mutex_unlock(&mutexes->write_file);
+                    pthread_mutex_unlock(&(mutexes->write_file));
                 }
 
             } else {
                 sprintf(mensagem, "%d:%d:%d Produto invalido: %s \n", t->tm_hour, t->tm_min, t->tm_sec, linha);
-                pthread_mutex_lock(&mutexes->write_file);
+                pthread_mutex_lock(&(mutexes->write_file));
                 write_log(mensagem);
-                pthread_mutex_unlock(&mutexes->write_file);
+                pthread_mutex_unlock(&(mutexes->write_file));
             }
         }
         else if (strcmp(token, "DRONE") == 0) {
@@ -919,35 +991,20 @@ void central(){
             sscanf(linha, "DRONE SET %d", &num);
             if(num < dados->n_drones) {
                 for(int k= num ; k < dados->n_drones; k++){
-                    if (arrayDrones[k].estado == 1 || arrayDrones[k].estado == 5){
-                        pthread_cancel(my_thread[k]);
-                        pthread_join(my_thread[k], NULL);
-                        arrayDrones[k].estado = 0;
-                        arrayDrones[k].id = 0;
-                        arrayDrones[k].posI[0] = 0;
-                        arrayDrones[k].posI[1] = 0;
-                        arrayDrones[k].posF[0] = 0;
-                        arrayDrones[k].posF[1] = 0;
-                    } else {
+                    printf("ESTA A FAZER ISTO :)\n");
+                    if (arrayDrones[k].estado != 1){
                         pthread_mutex_lock(&mutexes->drones);
-                        pthread_cancel(my_thread[k]);
                         pthread_join(my_thread[k], NULL);
                         pthread_mutex_unlock(&mutexes->drones);
-                        arrayDrones[k].estado = 0;
-                        arrayDrones[k].id = 0;
-                        arrayDrones[k].posI[0] = 0;
-                        arrayDrones[k].posI[1] = 0;
-                        arrayDrones[k].posF[0] = 0;
-                        arrayDrones[k].posF[1] = 0;
+                    } else {
+                        pthread_join(my_thread[k], NULL);
                     }
-                    printf("\nForam destruidas %d threads\n", dados->n_drones - num);
-                    dados->n_drones = num;
                 }
             } else if (num > dados->n_drones){
                     criaDrones(dados->n_drones,num);
                     dados->n_drones = num;
             } else {
-                printf("\nJa estao derteminadas %d threads\n", num);
+                printf("Ja estao derteminadas %d theads\n", num);
             }
         } else {
             printf("Comando invalido\nTente:\n\tORDER <order name> prod: <product name>, <quantity> to: <x>, <y>\n\tDRONE SET <num>\n");
@@ -955,7 +1012,6 @@ void central(){
     }
 }
 
-//informacoes estatisticas
 void sinal_estatistica(){
     //printf("entrei\n");
     //Calcula tempo medio
@@ -973,7 +1029,6 @@ void sinal_estatistica(){
     printf("Tempo medio = %0.2f\n", estatisticas->tempo_medio_total);    
 }
 
-//adiciona no ficheiro log a mensagem fornecida
 void write_log(char* mensagem) { //este valor remete para o ID por exemplo do drone ou armazem
     FILE *fp = fopen("log.txt","a");
     if(fp != NULL){
@@ -984,40 +1039,34 @@ void write_log(char* mensagem) { //este valor remete para o ID por exemplo do dr
     mensagem[0]='\0';
 }
 
-//encerra o programa
 void sinal_saida (int sig){
     //CTRL + C
+    int i=0;
     //tempo
     time_t tempo = time(NULL);
     struct tm*t =localtime(&tempo);
     pthread_mutex_unlock(&mutexes->ctrlc);
     printf("a encerrar o programa.\n");
     sinal_estatistica();
-
     if(getpid() == processo_central){
+        for(i=0;i<dados->n_drones;i++){
+            printf("\tdrone %ld destruido\n",my_thread[i] );
+            pthread_join(my_thread[i],NULL);
+        }
+
         if(unlink(PIPE_NAME)==0){
             printf("\tpipe fechado\n");
         }
-        for (int i = 0; i < dados->n_drones; i++) {
-            if (pthread_cancel(my_thread[i]) != 0) {
-                perror("Error canceling thread");
-                exit(1);
-            }
-            if (pthread_join(my_thread[i], NULL) != 0) {
-                perror("Error joining thread");
-                exit(1);
-            }
-            free(my_thread);
-        }
         printf("\tcentral terminada\n" );
+
+        //matar processos
+        kill(processo_central, SIGKILL);
+        printf("\tprocesso destruidos.\n");
         sprintf(mensagem, "%d:%d:%d Fim do programa\n",t->tm_hour,t->tm_min,t->tm_sec);
         printf("%s", mensagem);
         pthread_mutex_lock(&mutexes->write_file);
         write_log(mensagem);
         pthread_mutex_unlock(&mutexes->write_file);
-
-        //matar processos
-        kill(processo_central, SIGKILL);
 
     }else if(getpid()==processo_gestor){
 
@@ -1035,13 +1084,14 @@ void sinal_saida (int sig){
         // Message Queue
         msgctl(mq_id, IPC_RMID, NULL);
         printf("\tmessage queue destruida\n");
-        msgctl(mq_id2, IPC_RMID, NULL);
-        printf("\tmessage queue destruida\n");
 
         //semaforos
-        /*if(sem_shmid>=0){
+        if(sem_shmid>=0){
             semctl(sem_shmid, 0, IPC_RMID);
-        }*/
+        }
+        if(mutex_shmid>=0){
+            semctl(mutex_shmid, 0, IPC_RMID);
+        }
         printf("\tsemaforos destruidos.\n");
 
         //liberar mallocs
@@ -1056,12 +1106,9 @@ void sinal_saida (int sig){
         pthread_mutex_unlock(&mutexes->write_file);
 
         //mutex
-        if(mutex_shmid>=0){
-            semctl(mutex_shmid, 0, IPC_RMID);
-        }
         pthread_mutex_destroy(&mutexes->write_file);
         pthread_mutex_destroy(&mutexes->ctrlc);
-        pthread_mutex_destroy(&mutexes->get_queue);
+        pthread_mutex_destroy(&get_queue);
         pthread_mutex_destroy(&mutexes->retirar_mq);
         pthread_mutex_destroy(&mutexes->write_stats);
         pthread_mutex_destroy(&mutexes->write_armazens);
@@ -1075,7 +1122,7 @@ void sinal_saida (int sig){
         //matar processos
         kill(processo_gestor, SIGKILL);
 
-    } else {    //processo armazem
+    } else {
 
         for(int i=0; i<dados->numWh; i++){
             sprintf(mensagem, "%d:%d:%d Fim do processo armazem %d\n",t->tm_hour,t->tm_min,t->tm_sec,getpid());
